@@ -9,11 +9,19 @@ var casper = require('casper').create({
   waitTimeout: 20000
 });
 
-var mode = +casper.cli.args[0] || 0;
-var say_file = 'say' + mode + '.txt'
-var partner_say_file = 'say' + (+!mode) + '.txt'
+casper.setFilter("page.confirm", function(msg) {
+    console.log('confirm: ' + msg);
+    return true;
+});
 
-function ChatPadClient() {}
+// mode: 'alice', 'bob'
+function ChatPadClient(mode) {
+  this.mode = mode || 'alice';
+
+  this.new_message_index = 0;
+  this.messages = [];
+  this.chatlog = [];
+}
 
 ChatPadClient.prototype = {
   start: function () {
@@ -22,55 +30,53 @@ ChatPadClient.prototype = {
     casper.userAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 6_0 like Mac OS X) AppleWebKit/536.26 (KHTML, like Gecko) Version/6.0 Mobile/10A5376e Safari/8536.25');
 
     casper.start('http://sp.chatpad.jp/room/', function() {
-      client.casper_context = this;
-      var self = this;
+      var casper_context = client.casper_context = this;
 
-      self.echo(self.getTitle());
+      casper_context.echo(casper_context.getTitle());
 
-      client.last_messages = [];
-      client.last_companion_messages = [];
-      client.loop();
+      client.loop(function () {
+        var casper_context = client.casper_context;
+
+        casper_context.capture(client.mode + '.png');
+
+        var new_messages = client.getNewMessages();
+
+        if (new_messages.length > 0) {
+          client.printMessages(new_messages);
+
+          var new_message = new_messages[0];
+
+          if (new_message.type === 'systemMessage' && new_message.text.indexOf('終了したよ') !== -1) {
+            client.sendCommand('close')
+            client.startNewChat();
+            client.chatlog.push(client.messages);
+            client.messages = [];
+            client.new_message_index = 0;
+            return;
+          }
+        }
+
+        client.executeCommand();
+
+        client.sayFromSayFile();
+
+        var new_companion_messages = client.getNewCompanionMessages();
+        if (new_companion_messages.length > 0) {
+          client.writeToPartnerSayFile(new_companion_messages[0].text);
+        }
+
+        client.new_message_index = client.messages.length;
+      });
     });
 
     casper.run();
   },
-  loop: function () {
+  loop: function (callback) {
     var client = this;
-    var casper_context = client.casper_context;
 
-    casper_context.wait(100, function() {
-      casper_context.capture('room.png');
-
-      var messages = client.getMessages();
-      var companion_messages = client.getCompanionMessages();
-
-      var new_messages = messages.slice(client.last_messages.length);
-      var new_companion_messages = companion_messages.slice(client.last_companion_messages.length);
-
-      if (new_messages.length > 0) {
-        console.log(new_messages.join('\n'));
-      }
-
-      new_messages.forEach(function(message) {
-        if (message.indexOf('終了したよ') !== -1) {
-          client.startNewChat();
-          client.last_messages = [];
-          client.last_companion_messages = [];
-        }
-      });
-
-      var text = fs.read(say_file);
-      client.say(text);
-      fs.write(say_file, '', 'w');
-
-      if (new_companion_messages[0]) {
-        fs.write(partner_say_file, new_messages[0], 'w');
-      }
-
-      client.last_messages = messages;
-      client.last_companion_messages = companion_messages;
-
-      client.loop();
+    client.casper_context.wait(100, function() {
+      callback();
+      client.loop(callback);
     });
   },
   say: function (text) {
@@ -78,27 +84,84 @@ ChatPadClient.prototype = {
       document.querySelector('#sayField').value = text;
       document.querySelector('#sayButton').click();
     }, text);
+    console.log(this.mode + ': ' + text);
   },
-  startNewChat: function() {
+  startNewChat: function () {
     this.casper_context.evaluate(function() {
-      document.querySelector('#chatNewButton').click()
+      document.querySelector('#chatNewButton').click();
     });
   },
-  getMessages: function() {
-    return this.casper_context.evaluate(function() {
-      return [].map.call(document.querySelectorAll('#chatLog .message:not(.companionTypeMessage) .text'), function(text){
-        return text.textContent
-      })
+  closeChat: function () {
+    this.casper_context.evaluate(function() {
+      // copied from room.js
+      (void 0 !== roomChKey && socket.emit(roomChKey, {type: "close"}), setViewerStatus("CLOSE"), setOtherOnline(!1))
     });
   },
-  getCompanionMessages: function() {
+  getMessages: function () {
     return this.casper_context.evaluate(function() {
-      return [].map.call(document.querySelectorAll('#chatLog .companionMessage:not(.companionTypeMessage) .text'), function(text){
-        return text.textContent
-      })
+      return [].map.call(document.querySelectorAll('#chatLog .message:not(.companionTypeMessage)'), function(message){
+        return {
+          type: message.className.split(' ')[1],
+          text: message.querySelector('.text').textContent
+        };
+      });
     });
+  },
+  updateMessages: function () {
+    this.messages = this.getMessages();
+    return this.messages;
+  },
+  getNewCompanionMessages: function() {
+    return this.getNewMessages().filter(function(message){ return message.type === 'companionMessage' });
+  },
+  getNewSelfMessages: function() {
+    return this.getNewMessages().filter(function(message) { return message.type === 'selfMessage' });
+  },
+  getNewMessages: function() {
+    this.updateMessages();
+    return this.messages.slice(this.new_message_index);
+  },
+  readFromSayFile: function() {
+    var say_file = this.getSayFileName();
+    return fs.read(say_file);
+  },
+  writeToPartnerSayFile: function(text) {
+    var partner = this.getPartner();
+    var partner_say_file = 'say-' + partner + '.txt';
+    fs.write(partner_say_file, text, 'w');
+  },
+  sayFromSayFile: function() {
+    var text = this.readFromSayFile();
+    if (text.length) {
+      this.say(text);
+      fs.write(this.getSayFileName(), '', 'w');
+
+      return text;
+    }
+  },
+  getSayFileName: function() {
+    return 'say-' + this.mode + '.txt';
+  },
+  printMessages: function(messages) {
+    console.log(messages.map(function(message){ return message.text }).join('\n'));
+  },
+  sendCommand: function(command) {
+    var partner_command_file = 'command-' + this.getPartner() + '.txt';
+    fs.write(partner_command_file, command, 'w');
+  },
+  executeCommand: function() {
+    var command_file = 'command-' + this.mode + '.txt';
+    var command = fs.read(command_file);
+
+    if (/close/.test(command)) {
+      fs.write(command_file, '', 'w');
+      this.closeChat();
+    }
+  },
+  getPartner: function() {
+    return this.mode === 'alice' ? 'bob' : 'alice';
   }
 };
 
-var client = new ChatPadClient();
+var client = new ChatPadClient(casper.cli.args[0]);
 client.start();
