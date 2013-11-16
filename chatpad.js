@@ -2,6 +2,7 @@ var fs = require('fs');
 
 var casper = require('casper').create({
   verbose: true,
+  // logLevel: 'debug',
   pageSettings: {
     loadPlugins: false
   },
@@ -12,75 +13,92 @@ var mode = +casper.cli.args[0] || 0;
 var say_file = 'say' + mode + '.txt'
 var partner_say_file = 'say' + (+!mode) + '.txt'
 
-// set User Agent iOS6
-casper.userAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 6_0 like Mac OS X) AppleWebKit/536.26 (KHTML, like Gecko) Version/6.0 Mobile/10A5376e Safari/8536.25');
+function ChatPadClient() {}
 
-casper.start('http://sp.chatpad.jp/room/', function() {
-  var self = this;
-  this.echo(this.getTitle());
+ChatPadClient.prototype = {
+  start: function () {
+    var client = this;
+    // set User Agent iOS6
+    casper.userAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 6_0 like Mac OS X) AppleWebKit/536.26 (KHTML, like Gecko) Version/6.0 Mobile/10A5376e Safari/8536.25');
 
-  var say = function (text) {
-    self.evaluate(function(text){
-      document.querySelector('#sayField').value = text;
-      document.querySelector('#sayButton').click();
-    }, text);
-  };
+    casper.start('http://sp.chatpad.jp/room/', function() {
+      client.casper_context = this;
+      var self = this;
 
-  var startNewChat = function() {
-    self.evaluate(function() {
-      document.querySelector('#chatNewButton').click()
+      self.echo(self.getTitle());
+
+      client.last_messages = [];
+      client.last_companion_messages = [];
+      client.loop();
     });
-  };
 
-  var last_messages = [];
-  var last_companion_messages = [];
+    casper.run();
+  },
+  loop: function () {
+    var client = this;
+    var casper_context = client.casper_context;
 
-  var loop = function () {
-    self.wait(1000, function() {
-      self.capture('room.png');
+    casper_context.wait(100, function() {
+      casper_context.capture('room.png');
 
-      var messages = self.evaluate(function() {
-        return [].map.call(document.querySelectorAll('#chatLog .message:not(.companionTypeMessage) .text'), function(text){
-          return text.textContent
-        })
-      });
+      var messages = client.getMessages();
+      var companion_messages = client.getCompanionMessages();
 
-      var companion_messages = self.evaluate(function() {
-        return [].map.call(document.querySelectorAll('#chatLog .companionMessage:not(.companionTypeMessage) .text'), function(text){
-          return text.textContent
-        })
-      });
+      var new_messages = messages.slice(client.last_messages.length);
+      var new_companion_messages = companion_messages.slice(client.last_companion_messages.length);
 
-      var new_messages = messages.slice(last_messages.length);
-      var new_companion_messages = companion_messages.slice(last_companion_messages.length);
-      console.log('************************************')
-      console.log(messages.join('\n'));
-      console.log('------------------------------------');
-      console.log(new_messages.join('\n'));
+      if (new_messages.length > 0) {
+        console.log(new_messages.join('\n'));
+      }
 
       new_messages.forEach(function(message) {
         if (message.indexOf('終了したよ') !== -1) {
-          startNewChat();
-          last_messages = [];
-          last_companion_messages = [];
+          client.startNewChat();
+          client.last_messages = [];
+          client.last_companion_messages = [];
         }
       });
 
       var text = fs.read(say_file);
-      say(text);
+      client.say(text);
       fs.write(say_file, '', 'w');
 
       if (new_companion_messages[0]) {
         fs.write(partner_say_file, new_messages[0], 'w');
       }
 
-      last_messages = messages;
-      last_companion_messages = companion_messages;
+      client.last_messages = messages;
+      client.last_companion_messages = companion_messages;
 
-      loop();
+      client.loop();
+    });
+  },
+  say: function (text) {
+    this.casper_context.evaluate(function(text){
+      document.querySelector('#sayField').value = text;
+      document.querySelector('#sayButton').click();
+    }, text);
+  },
+  startNewChat: function() {
+    this.casper_context.evaluate(function() {
+      document.querySelector('#chatNewButton').click()
+    });
+  },
+  getMessages: function() {
+    return this.casper_context.evaluate(function() {
+      return [].map.call(document.querySelectorAll('#chatLog .message:not(.companionTypeMessage) .text'), function(text){
+        return text.textContent
+      })
+    });
+  },
+  getCompanionMessages: function() {
+    return this.casper_context.evaluate(function() {
+      return [].map.call(document.querySelectorAll('#chatLog .companionMessage:not(.companionTypeMessage) .text'), function(text){
+        return text.textContent
+      })
     });
   }
-  loop();
-});
+};
 
-casper.run();
+var client = new ChatPadClient();
+client.start();
